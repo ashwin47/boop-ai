@@ -43,6 +43,14 @@ final class BoopSettings {
 
     // MARK: - Behaviour
 
+    var useScreenRecognition: Bool {
+        didSet { defaults.set(useScreenRecognition, forKey: "useScreenRecognition") }
+    }
+
+    var playSoundsOnComplete: Bool {
+        didSet { defaults.set(playSoundsOnComplete, forKey: "playSoundsOnComplete") }
+    }
+
     var modelID: String {
         didSet { defaults.set(modelID, forKey: "modelID") }
     }
@@ -74,6 +82,8 @@ final class BoopSettings {
 
     private init() {
         defaults.register(defaults: [
+            "useScreenRecognition": false,
+            "playSoundsOnComplete": true,
             "modelID": AIModel.defaultID,
             "reasoningEffort": ReasoningEffort.default.rawValue,
             // Hyper + A — what Raycast's caps-lock hyper key produces.
@@ -81,6 +91,8 @@ final class BoopSettings {
             "hotKeyModifiers": Int(cmdKey | controlKey | optionKey | shiftKey),
         ])
         accountID = defaults.string(forKey: "accountID") ?? ""
+        useScreenRecognition = defaults.bool(forKey: "useScreenRecognition")
+        playSoundsOnComplete = defaults.bool(forKey: "playSoundsOnComplete")
         gatewayID = defaults.string(forKey: "gatewayID") ?? ""
         modelID = defaults.string(forKey: "modelID") ?? AIModel.defaultID
         reasoningEffort = defaults.string(forKey: "reasoningEffort")

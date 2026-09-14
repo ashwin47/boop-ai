@@ -25,6 +25,7 @@ final class PopupController {
 
     @ObservationIgnored private var popover: NSPopover?
     @ObservationIgnored private var anchorWindow: AnchorWindow?
+    @ObservationIgnored private var captureTask: Task<Void, Never>?
     @ObservationIgnored private var streamTask: Task<Void, Never>?
     @ObservationIgnored private var sourceApp: NSRunningApplication?
     @ObservationIgnored private var keyMonitor: Any?
@@ -59,12 +60,19 @@ final class PopupController {
         sourceApp = frontmost
         targetAppName = frontmost?.localizedName
 
-        Task {
-            guard let selection = await TextCapture.capture() else {
+        captureTask?.cancel()
+        captureTask = Task {
+            guard let selection = await TextCapture.capture(
+                useScreenRecognition: BoopSettings.shared.useScreenRecognition
+            ) else {
+                guard !Task.isCancelled,
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier == frontmost?.processIdentifier
+                else { return }
                 present(anchoredTo: nil, kind: .unknown)
                 fail("Select some text first, then press the Boop hot key.")
                 return
             }
+            guard !Task.isCancelled else { return }
             original = selection.text
             present(anchoredTo: selection.anchor, kind: selection.anchorKind)
             start()
@@ -107,6 +115,7 @@ final class PopupController {
                 var pending = ""
                 var lastFlush = ContinuousClock.now
                 for try await delta in deltas {
+                    guard !Task.isCancelled else { return }
                     pending += delta
                     if ContinuousClock.now - lastFlush >= .milliseconds(50) {
                         output += pending
@@ -114,14 +123,21 @@ final class PopupController {
                         lastFlush = ContinuousClock.now
                     }
                 }
+                // Cancellation can end AsyncThrowingStream without throwing.
+                // A dismissed or superseded request must not announce completion.
+                guard !Task.isCancelled else { return }
                 if !pending.isEmpty { output += pending }
                 isStreaming = false
                 if output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     errorMessage = "The model returned an empty response."
                 } else {
                     HotKeyManager.shared.enableConfirmKey()
+                    if settings.playSoundsOnComplete {
+                        CompletionSound.shared.play()
+                    }
                 }
             } catch {
+                guard !Task.isCancelled else { return }
                 isStreaming = false
                 errorMessage = (error as? LocalizedError)?.errorDescription
                     ?? error.localizedDescription
@@ -200,10 +216,11 @@ final class PopupController {
         // Deliberately no NSApp.activate(): taking focus greys out the selection
         // Boop is about to replace, and drags our other windows forward.
         if !popover.isShown {
-            // Prefer hanging below the selection; the popover flips itself when
-            // it runs out of room and keeps its notch on the text either way.
-            popover.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+            popover.show(relativeTo: view.bounds, of: view,
+                         preferredEdge: PopupPlacement.preferredEdge(for: rect))
         }
+        // Regenerating/retriggering can reuse an already visible popover.
+        popover.positioningRect = view.bounds
         // NSPopover builds its own window; make that one non-activating too so a
         // click on Copy or Paste doesn't yank focus away from the source app.
         if let popoverWindow = popover.contentViewController?.view.window as? NSPanel {
@@ -238,6 +255,8 @@ final class PopupController {
     /// Idempotent — reached both from `dismiss()` and from the popover closing
     /// itself when the user clicks away.
     private func teardown() {
+        captureTask?.cancel()
+        captureTask = nil
         streamTask?.cancel()
         streamTask = nil
         isStreaming = false

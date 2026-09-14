@@ -26,6 +26,7 @@ struct SettingsView: View {
 private struct GeneralSettings: View {
     @Bindable private var settings = BoopSettings.shared
     @State private var hasAccessibility = AccessibilityPermission.isGranted
+    @State private var hasScreenRecording = ScreenSelectionLocator.hasPermission
 
     /// Re-checked when the app comes forward rather than on a timer: the window is
     /// never released, so a `Timer.publish` here would keep firing for the life of
@@ -69,6 +70,37 @@ private struct GeneralSettings: View {
             }
 
             Section {
+                Toggle("Play sounds on complete", isOn: $settings.playSoundsOnComplete)
+            } header: {
+                Text("Sounds")
+            }
+
+            Section {
+                Toggle("Find selected text on screen", isOn: $settings.useScreenRecognition)
+                Text("When an app cannot provide text bounds, recognize the selected text in a screenshot of its window. Processing stays on your Mac; the image is never saved or sent to AI.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if settings.useScreenRecognition {
+                    LabeledContent("Screen Recording") {
+                        if hasScreenRecording {
+                            Label("Granted", systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                        } else {
+                            Button("Allow Screen Recording…") {
+                                ScreenSelectionLocator.requestPermission()
+                                hasScreenRecording = ScreenSelectionLocator.hasPermission
+                            }
+                        }
+                    }
+                    Text("macOS requires Screen Recording permission for this fallback. You may need to restart Boop after granting access.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Popover Placement")
+            }
+
+            Section {
                 Toggle("Check for updates automatically", isOn: Binding(
                     get: { UpdaterManager.shared.automaticallyChecksForUpdates },
                     set: { UpdaterManager.shared.automaticallyChecksForUpdates = $0 }
@@ -106,9 +138,13 @@ private struct GeneralSettings: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { hasAccessibility = AccessibilityPermission.isGranted }
+        .onAppear {
+            hasAccessibility = AccessibilityPermission.isGranted
+            hasScreenRecording = ScreenSelectionLocator.hasPermission
+        }
         .onReceive(becameActive) { _ in
             hasAccessibility = AccessibilityPermission.isGranted
+            hasScreenRecording = ScreenSelectionLocator.hasPermission
         }
     }
 }

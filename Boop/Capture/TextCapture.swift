@@ -5,6 +5,7 @@
 
 import AppKit
 import ApplicationServices
+import OSLog
 
 /// How much the anchor rectangle actually tells us about where the text is.
 enum AnchorKind {
@@ -28,66 +29,155 @@ struct Selection {
 }
 
 enum TextCapture {
-    /// Reads the current selection, preferring the Accessibility API and falling
-    /// back to a ⌘C round-trip for apps (Electron, some web views) that don't
-    /// expose `AXSelectedText`.
-    static func capture() async -> Selection? {
-        let app = frontmostAppElement()
-        let focused = focusedElement(in: app)
-        if let focused { AXUIElementSetMessagingTimeout(focused, 0.4) }
+    private static let logger = Logger(subsystem: "com.fayazahmed.Boop", category: "Selection")
 
-        // Best case: the exact rect of the selected glyphs. Plenty of controls
-        // (Xcode's search field among them) don't implement AXBoundsForRange, so
-        // fall back to the focused control, then to its window.
-        let anchor: (NSRect, AnchorKind)? =
-            focused.flatMap(selectionBounds).map { ($0, .glyphs) }
-            ?? focused.flatMap(elementFrame).map { ($0, .element) }
-            ?? app.flatMap(focusedWindowFrame).map { ($0, .window) }
-
-        let rect = anchor?.0
-        let kind = anchor?.1 ?? .unknown
-
-        if let focused,
-           let text = attribute(focused, kAXSelectedTextAttribute) as? String,
-           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return Selection(text: text, anchor: rect, anchorKind: kind)
-        }
-
-        if let copied = await copyViaPasteboard() {
-            return Selection(text: copied, anchor: rect, anchorKind: kind)
-        }
-        return nil
+    private struct Snapshot {
+        var text: String?
+        var bounds: NSRect?
+        var fallback: NSRect?
+        var fallbackKind: AnchorKind = .unknown
+        var method = "fallback"
     }
 
-    /// The frontmost app's AX element, with Chromium's full accessibility tree
-    /// switched on.
-    ///
-    /// Chrome, Electron and friends ship a stub AX tree until a client asks for
-    /// the real one by setting `AXManualAccessibility`. Without it there is no
-    /// focused element and no text bounds, which is why Boop used to fall all the
-    /// way through to the mouse pointer in a Chrome text box. Other apps just
-    /// reject the attribute, which is harmless.
-    private static func frontmostAppElement() -> AXUIElement? {
-        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        else { return nil }
+    /// Chromium may build its accessibility tree asynchronously after it is enabled.
+    /// Re-query fresh elements on a short, bounded retry schedule before using ⌘C.
+    static func capture(useScreenRecognition: Bool = false) async -> Selection? {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return nil }
         let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.4)
+        AXUIElementSetMessagingTimeout(app, 0.05)
         AXUIElementSetAttributeValue(app, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-        return app
+
+        var snapshot = Snapshot()
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                do { try await Task.sleep(for: .milliseconds(attempt * 60)) }
+                catch { return nil }
+            }
+            guard !Task.isCancelled,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return nil }
+            snapshot = inspect(app: app, pid: pid)
+            if snapshot.text != nil && snapshot.bounds != nil { break }
+        }
+
+        guard !Task.isCancelled,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return nil }
+        let text: String
+        if let selected = snapshot.text {
+            text = selected
+        } else {
+            guard let copied = await copyViaPasteboard(expectedPID: pid) else { return nil }
+            text = copied
+            // Copy also gives a newly enabled web accessibility tree time to settle.
+            let refreshed = inspect(app: app, pid: pid)
+            if refreshed.text == copied { snapshot = refreshed }
+        }
+        if snapshot.bounds == nil, useScreenRecognition {
+            if !ScreenSelectionLocator.hasPermission {
+                snapshot.method = "screen recognition needs permission"
+            } else if let bounds = await ScreenSelectionLocator.locate(text: text, pid: pid) {
+                snapshot.bounds = bounds
+                snapshot.method = "screen recognition"
+            } else {
+                snapshot.method = "screen recognition unavailable or ambiguous"
+            }
+        }
+        guard !Task.isCancelled,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return nil }
+        let kind: AnchorKind = snapshot.bounds == nil ? snapshot.fallbackKind : .glyphs
+        logger.info("Selection anchor: \(snapshot.method, privacy: .public), kind: \(String(describing: kind), privacy: .public)")
+        return Selection(text: text, anchor: snapshot.bounds ?? snapshot.fallback, anchorKind: kind)
     }
 
-    /// The system-wide query is cheapest, but comes back empty for apps that only
-    /// just enabled accessibility — so ask the app itself as well.
-    private static func focusedElement(in app: AXUIElement?) -> AXUIElement? {
+    private static func inspect(app: AXUIElement, pid: pid_t) -> Snapshot {
+        let deadline = ContinuousClock.now + .milliseconds(200)
+        var snapshot = Snapshot()
+        let focused = focusedElement(app: app, pid: pid)
+        let window = element(app, kAXFocusedWindowAttribute)
+        if let window, let frame = elementFrame(window) {
+            snapshot.fallback = frame
+            snapshot.fallbackKind = .window
+        }
+        if let focused, let frame = elementFrame(focused) {
+            let role = attribute(focused, kAXRoleAttribute) as? String
+            if role != kAXWindowRole && role != kAXApplicationRole && role != "AXWebArea" {
+                snapshot.fallback = frame
+                snapshot.fallbackKind = .element
+            }
+        }
+
+        var visited: [AXUIElement] = []
+        func probe(_ candidate: AXUIElement) -> Bool {
+            guard ContinuousClock.now < deadline,
+                  !visited.contains(where: { CFEqual($0, candidate) }) else { return false }
+            var candidatePID: pid_t = 0
+            guard AXUIElementGetPid(candidate, &candidatePID) == .success,
+                  candidatePID == pid else { return false }
+            visited.append(candidate)
+            AXUIElementSetMessagingTimeout(candidate, 0.04)
+
+            // Treat text markers as opaque AX values; the owning app interprets them.
+            let marker = attribute(candidate, "AXSelectedTextMarkerRange")
+            let markerText = marker.flatMap {
+                nonempty(parameter(candidate, "AXStringForTextMarkerRange", $0) as? String)
+            }
+            let rangeText = nonempty(attribute(candidate, kAXSelectedTextAttribute) as? String)
+            guard let text = markerText ?? rangeText else { return false }
+            // Never attach one element's bounds to another element's different selection.
+            guard snapshot.text == nil || snapshot.text == text else { return false }
+            snapshot.text = text
+
+            if let marker, markerText == text,
+               let bounds = rectangle(parameter(candidate, "AXBoundsForTextMarkerRange", marker)) {
+                snapshot.bounds = bounds
+                snapshot.method = "text-marker range"
+                return true
+            }
+            if rangeText == text, let bounds = selectionBounds(candidate) {
+                snapshot.bounds = bounds
+                snapshot.method = "character range"
+                return true
+            }
+            return false
+        }
+
+        // A contenteditable's selection can belong to its containing AXWebArea.
+        var ancestor = focused
+        for _ in 0..<10 {
+            guard let current = ancestor, ContinuousClock.now < deadline else { break }
+            if probe(current) { return snapshot }
+            ancestor = element(current, kAXParentAttribute)
+        }
+
+        // When focus is a window/group, find its web area without walking an
+        // unbounded document tree. Never inspect other windows or applications.
+        var queue = window.map { [$0] } ?? []
+        var index = 0
+        while index < queue.count && index < 60 && ContinuousClock.now < deadline {
+            let current = queue[index]
+            index += 1
+            if probe(current) { return snapshot }
+            if let children = attribute(current, kAXChildrenAttribute) as? [AXUIElement] {
+                for child in children where queue.count < 60 {
+                    if !queue.contains(where: { CFEqual($0, child) }) { queue.append(child) }
+                }
+            }
+        }
+        return snapshot
+    }
+
+    private static func nonempty(_ text: String?) -> String? {
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return text
+    }
+
+    private static func focusedElement(app: AXUIElement, pid: pid_t) -> AXUIElement? {
+        if let focused = element(app, kAXFocusedUIElementAttribute) { return focused }
         let system = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(system, 0.4)
-        if let focused = element(system, kAXFocusedUIElementAttribute) { return focused }
-        return app.flatMap { element($0, kAXFocusedUIElementAttribute) }
-    }
-
-    private static func focusedWindowFrame(_ app: AXUIElement) -> NSRect? {
-        guard let window = element(app, kAXFocusedWindowAttribute) else { return nil }
-        return elementFrame(window)
+        AXUIElementSetMessagingTimeout(system, 0.04)
+        guard let focused = element(system, kAXFocusedUIElementAttribute) else { return nil }
+        var focusedPID: pid_t = 0
+        guard AXUIElementGetPid(focused, &focusedPID) == .success, focusedPID == pid else { return nil }
+        return focused
     }
 
     // MARK: - Accessibility
@@ -109,42 +199,63 @@ enum TextCapture {
     /// Asks the focused element for the on-screen rectangle of its selected range.
     private static func selectionBounds(_ element: AXUIElement) -> NSRect? {
         guard let rangeValue = attribute(element, kAXSelectedTextRangeAttribute),
-              CFGetTypeID(rangeValue) == AXValueGetTypeID()
+              CFGetTypeID(rangeValue) == AXValueGetTypeID(),
+              AXValueGetType(rangeValue as! AXValue) == .cfRange
         else { return nil }
 
         var range = CFRange()
-        guard AXValueGetValue(rangeValue as! AXValue, .cfRange, &range), range.length > 0 else {
+        guard AXValueGetValue(rangeValue as! AXValue, .cfRange, &range),
+              range.location >= 0, range.length > 0 else {
             return nil
         }
 
-        // Long selections often report a rect spanning the whole block. Asking about
-        // the first chunk keeps the anchor near where the user is actually looking.
-        var probe = CFRange(location: range.location, length: min(range.length, 1))
-        guard let probeValue = AXValueCreate(.cfRange, &probe) else { return nil }
+        // Preserve the full selection so the popover can sit outside it, including
+        // when AppKit flips it above a multiline selection near the screen bottom.
+        guard let probeValue = AXValueCreate(.cfRange, &range) else { return nil }
+        return rectangle(parameter(element, kAXBoundsForRangeParameterizedAttribute, probeValue))
+    }
 
+    private static func parameter(_ element: AXUIElement, _ name: String, _ value: CFTypeRef) -> AnyObject? {
         var result: AnyObject?
         guard AXUIElementCopyParameterizedAttributeValue(
-            element,
-            kAXBoundsForRangeParameterizedAttribute as CFString,
-            probeValue,
-            &result
-        ) == .success, let result, CFGetTypeID(result) == AXValueGetTypeID() else { return nil }
+            element, name as CFString, value, &result
+        ) == .success else { return nil }
+        return result
+    }
 
+    private static func rectangle(_ value: AnyObject?) -> NSRect? {
+        guard let value, CFGetTypeID(value) == AXValueGetTypeID(),
+              AXValueGetType(value as! AXValue) == .cgRect else { return nil }
         var rect = CGRect.zero
-        guard AXValueGetValue(result as! AXValue, .cgRect, &rect), rect.width.isFinite,
-              rect.height.isFinite, rect.height > 0
-        else { return nil }
-        // A single glyph can legitimately report zero width.
-        rect.size.width = max(rect.width, 1)
-        return convertFromAX(rect)
+        guard AXValueGetValue(value as! AXValue, .cgRect, &rect) else { return nil }
+        return visibleRectangle(rect)
+    }
+
+    private static func visibleRectangle(_ rect: CGRect) -> NSRect? {
+        guard rect.origin.x.isFinite, rect.origin.y.isFinite,
+              rect.width.isFinite, rect.height.isFinite,
+              rect.width >= 0, rect.height > 0 else { return nil }
+        var converted = convertFromAX(rect)
+        converted.size.width = max(converted.width, 1)
+        // Ignore stale/offscreen bounds; clip selections that are partly scrolled out.
+        return NSScreen.screens.map { converted.intersection($0.visibleFrame) }
+            .filter { !$0.isNull && !$0.isEmpty }
+            .max { $0.width * $0.height < $1.width * $1.height }
     }
 
     private static func elementFrame(_ element: AXUIElement) -> NSRect? {
-        guard let value = attribute(element, "AXFrame"), CFGetTypeID(value) == AXValueGetTypeID()
-        else { return nil }
-        var rect = CGRect.zero
-        guard AXValueGetValue(value as! AXValue, .cgRect, &rect), !rect.isEmpty else { return nil }
-        return convertFromAX(rect)
+        AXUIElementSetMessagingTimeout(element, 0.04)
+        if let frame = rectangle(attribute(element, "AXFrame")) { return frame }
+        // AXPosition + AXSize are the standard attributes; AXFrame is not universal.
+        guard let position = attribute(element, kAXPositionAttribute),
+              let size = attribute(element, kAXSizeAttribute),
+              CFGetTypeID(position) == AXValueGetTypeID(),
+              CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+        var origin = CGPoint.zero
+        var dimensions = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(size as! AXValue, .cgSize, &dimensions) else { return nil }
+        return visibleRectangle(CGRect(origin: origin, size: dimensions))
     }
 
     /// Accessibility reports top-left-origin coordinates relative to the display
@@ -163,8 +274,10 @@ enum TextCapture {
 
     // MARK: - Pasteboard fallback
 
-    private static func copyViaPasteboard() async -> String? {
+    private static func copyViaPasteboard(expectedPID: pid_t) async -> String? {
         await Synthetic.waitForModifiersToClear()
+        guard !Task.isCancelled,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == expectedPID else { return nil }
 
         let pasteboard = NSPasteboard.general
         let snapshot = PasteboardSnapshot.capture()

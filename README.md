@@ -31,9 +31,17 @@ is a dropdown rather than a re-auth.
 ## Features
 
 - **Anchored popover.** Reads the selection's on-screen rectangle via the
-  Accessibility API, so the popover's notch points at the text you selected —
-  not at your mouse.
+  Accessibility API, including Chromium/Electron text-marker ranges. Briefly
+  retries while accessibility initializes, and places the popover above or below
+  the full highlight with a small gap. When bounds are unavailable, an optional
+  on-device screen recognition fallback locates the text in the source window.
+  Otherwise, Boop uses the focused control or a stable position in the source
+  window. The pointer is used only when no usable window bounds are available.
 - **Streaming.** Responses stream in token by token.
+- **Quiet completion sound.** Cuelume's Success chime plays when a rewrite
+  finishes successfully. Enabled by default; turn it off with **Settings →
+  General → Play sounds on complete**. Cancelled, failed, and empty responses
+  stay silent.
 - **Copy / Paste / Regenerate.** Paste names its target — "Paste into Google
   Chrome" — and replaces the original selection. Press <kbd>↩</kbd> to paste,
   <kbd>esc</kbd> to dismiss.
@@ -78,6 +86,18 @@ Security → Accessibility**.
 Open **Settings → Gateway** and fill in the account ID, gateway name, and token.
 The token is stored in the Keychain.
 
+### 4. Optional: precise placement in apps without text bounds
+
+In **Settings → General → Popover Placement**, enable **Find selected text on
+screen**, then click **Allow Screen Recording…** and grant macOS permission.
+Restart Boop if macOS asks. This option defaults to off.
+
+When accessibility cannot locate a selection, Boop captures only the source
+window and uses Apple Vision to match the selected text locally. The image is
+never saved or sent to the AI provider. Recognition adds some delay and accepts
+  only a confident, unique match; very short text, duplicate occurrences, or text
+outside the visible window may still use the window fallback.
+
 ## Models
 
 | Provider  | Models |
@@ -103,11 +123,22 @@ open Boop.xcodeproj
 Sparkle is pulled in via Swift Package Manager and resolves on first build. The
 updater is compiled out in Debug builds.
 
+Run `zsh scripts/check-popup-placement.sh` for selection geometry checks and
+`zsh scripts/check-screen-recognition.sh` for text matching checks. The latter
+also accepts a screenshot path and selected text as two arguments for a local
+OCR integration check. To
+diagnose an app that still falls back, filter Console for Boop's `Selection`
+category; it records the anchor method without
+logging selected text. Verify Chrome/Electron placement with both mouse and
+keyboard selections, multiline text, and windows on different displays.
+
 ## How it works
 
 | Piece | What it does |
 |---|---|
 | `Capture/TextCapture.swift` | Reads `AXSelectedText` and the selection's bounds, falling back to a ⌘C round-trip for apps that don't expose them. Enables Chromium's full AX tree via `AXManualAccessibility`. |
+| `Capture/ScreenSelectionLocator.swift` | Optional window-only ScreenCaptureKit capture and on-device Vision text recognition. |
+| `Capture/ScreenTextMatcher.swift` | Finds a confident unique match, including wrapped text and small OCR errors. |
 | `Capture/Synthetic.swift` | Posts ⌘C / ⌘V, waiting for the Hyper chord to be released first — posted keystrokes otherwise inherit held modifiers. |
 | `Support/HotKeyManager.swift` | Carbon `RegisterEventHotKey` for the trigger chord and for Return, because Carbon *consumes* the keystroke where an event monitor only observes it. |
 | `AI/GatewayClient.swift` | Streaming SSE client for the AI Gateway. |
@@ -126,3 +157,7 @@ go run ./cmd/boop-release -build -yes \
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+The Success sound is adapted from Cuelume by Daniel Belyi (MIT). Its license is
+included in [Boop/Resources/Cuelume-LICENSE.txt](Boop/Resources/Cuelume-LICENSE.txt).
+Regenerate the bundled sound with `python3 scripts/render-success-sound.py`.
