@@ -14,7 +14,8 @@ final class BoopSettings {
     private let defaults = UserDefaults.standard
     private static let tokenAccount = "gateway-token"
 
-    static let defaultPrompt = """
+    /// The single prompt Boop shipped with before actions existed.
+    private static let legacyDefaultPrompt = """
         You are a writing assistant. Rewrite the user's text so it reads clearly and correctly: \
         fix spelling, grammar and punctuation, tighten wordy phrasing, and improve flow.
 
@@ -55,8 +56,13 @@ final class BoopSettings {
         didSet { defaults.set(modelID, forKey: "modelID") }
     }
 
-    var prompt: String {
-        didSet { defaults.set(prompt, forKey: "prompt") }
+    /// The entries shown in the hot-key menu, in order.
+    var actions: [RewriteAction] {
+        didSet {
+            if let data = try? JSONEncoder().encode(actions) {
+                defaults.set(data, forKey: "actions")
+            }
+        }
     }
 
     var reasoningEffort: ReasoningEffort {
@@ -97,9 +103,22 @@ final class BoopSettings {
         modelID = defaults.string(forKey: "modelID") ?? AIModel.defaultID
         reasoningEffort = defaults.string(forKey: "reasoningEffort")
             .flatMap(ReasoningEffort.init(rawValue:)) ?? .default
-        prompt = defaults.string(forKey: "prompt") ?? Self.defaultPrompt
+        actions = Self.loadActions(from: defaults)
         hotKeyCode = UInt32(defaults.integer(forKey: "hotKeyCode"))
         hotKeyModifiers = UInt32(defaults.integer(forKey: "hotKeyModifiers"))
         token = Keychain.get(Self.tokenAccount)
+    }
+
+    private static func loadActions(from defaults: UserDefaults) -> [RewriteAction] {
+        if let data = defaults.data(forKey: "actions"),
+           let saved = try? JSONDecoder().decode([RewriteAction].self, from: data) {
+            return saved
+        }
+        var actions = RewriteAction.defaults
+        // Carry a prompt customised before actions existed over to "Improve writing".
+        if let legacy = defaults.string(forKey: "prompt"), legacy != legacyDefaultPrompt {
+            actions[0].prompt = legacy
+        }
+        return actions
     }
 }

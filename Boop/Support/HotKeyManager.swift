@@ -10,22 +10,19 @@ import Carbon.HIToolbox
 /// because it actually swallows the keystroke instead of letting it fall through
 /// to whatever app you were typing in.
 ///
-/// That matters twice over: for the trigger chord, and for the Return key that
-/// confirms a result. Boop is never the active app, so a plain event monitor
-/// would paste *and* leave a newline behind in the field.
+/// Boop is never the active app, so a plain event monitor would also leave the
+/// chord's keystroke behind in the field.
 @MainActor
 final class HotKeyManager {
     static let shared = HotKeyManager()
 
     var onTrigger: (() -> Void)?
-    var onConfirm: (() -> Void)?
 
     private var triggerRef: EventHotKeyRef?
-    private var confirmRef: EventHotKeyRef?
     private var handlerRef: EventHandlerRef?
 
     private let signature = OSType(0x424F_4F50) // 'BOOP'
-    private enum ID: UInt32 { case trigger = 1, confirm = 2 }
+    private enum ID: UInt32 { case trigger = 1 }
 
     private init() {}
 
@@ -59,25 +56,9 @@ final class HotKeyManager {
         return triggerRef != nil
     }
 
-    // MARK: - Return to confirm
-
-    /// Claims the Return key while a finished result is on screen. Kept as narrow
-    /// as possible — nothing else on the system can use Return until it's released.
-    func enableConfirmKey() {
-        guard confirmRef == nil else { return }
-        installHandlerIfNeeded()
-        confirmRef = register(code: UInt32(kVK_Return), modifiers: 0, id: .confirm)
-    }
-
-    func disableConfirmKey() {
-        if let confirmRef { UnregisterEventHotKey(confirmRef) }
-        confirmRef = nil
-    }
-
     func unregisterAll() {
         if let triggerRef { UnregisterEventHotKey(triggerRef) }
         triggerRef = nil
-        disableConfirmKey()
     }
 
     // MARK: - Plumbing
@@ -94,7 +75,6 @@ final class HotKeyManager {
     fileprivate func fire(id: UInt32) {
         switch ID(rawValue: id) {
         case .trigger: onTrigger?()
-        case .confirm: onConfirm?()
         case nil: break
         }
     }

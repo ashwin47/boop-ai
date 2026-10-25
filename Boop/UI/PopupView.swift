@@ -11,83 +11,78 @@ struct PopupView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider().opacity(0.6)
-            body(for: controller)
-            Divider().opacity(0.6)
-            footer
-        }
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        HStack(spacing: 6) {
-            Image(.boopMark)
-                .resizable()
-                .renderingMode(.template)
-                .frame(width: 13, height: 13)
-                .foregroundStyle(.primary)
-            Text("Improve Writing")
-                .font(.system(size: 12, weight: .semibold))
-            Spacer(minLength: 8)
-            if controller.isStreaming {
-                ProgressView()
-                    .controlSize(.small)
-                    .scaleEffect(0.7)
-                    .frame(width: 12, height: 12)
+            if let error = controller.errorMessage {
+                errorView(error)
             }
-            Text(controller.modelName)
-                .font(.system(size: 10.5))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            list
         }
-        .padding(.horizontal, 12)
-        .frame(height: 32)
     }
 
-    // MARK: - Body
+    // MARK: - List
 
-    @ViewBuilder
-    private func body(for controller: PopupController) -> some View {
+    private var list: some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
-                Group {
-                    if let error = controller.errorMessage {
-                        errorView(error)
-                    } else if controller.output.isEmpty {
-                        placeholder
-                    } else {
-                        Text(controller.output)
-                            .font(.system(size: 13))
-                            .lineSpacing(2)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                LazyVStack(spacing: 2) {
+                    ForEach(Array(controller.menuItems.enumerated()), id: \.element.id) { index, action in
+                        row(action, index: index)
+                            .id(index)
                     }
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-
-                Color.clear.frame(height: 1).id(Self.bottomAnchor)
+                .padding(6)
             }
-            .onChange(of: controller.output) {
-                // Keep the newest tokens in view while the response streams in.
-                // Deliberately unanimated: animating once per token makes SwiftUI
-                // complain about updating multiple times per frame.
-                proxy.scrollTo(Self.bottomAnchor, anchor: .bottom)
+            .onChange(of: controller.highlightedIndex) { _, index in
+                proxy.scrollTo(index)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .disabled(controller.original.isEmpty)
     }
 
-    private var placeholder: some View {
-        HStack(spacing: 6) {
-            Text(controller.isReasoning ? "Thinking…" : "Improving…")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+    private func row(_ action: RewriteAction, index: Int) -> some View {
+        let isHighlighted = index == controller.highlightedIndex
+        let isRunning = controller.runningAction?.id == action.id
+        return Button {
+            controller.run(action)
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: action.icon)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.tint)
+                    .frame(width: 18)
+                Text(action.name)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 8)
+                if isRunning {
+                    ProgressView()
+                        .controlSize(.small)
+                        .scaleEffect(0.7)
+                        .frame(width: 14, height: 14)
+                } else if isHighlighted {
+                    Image(systemName: "return")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else if index < 9 {
+                    Text("\(index + 1)")
+                        .font(.system(size: 11, design: .rounded))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 30)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isHighlighted ? Color.primary.opacity(0.1) : .clear)
+            )
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .buttonStyle(.plain)
+        .disabled(controller.isRunning)
+        .onHover { hovering in
+            if hovering, !controller.isRunning { controller.highlight(index) }
+        }
     }
 
     private func errorView(_ message: String) -> some View {
@@ -101,50 +96,8 @@ struct PopupView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.top, 10)
+        .padding(.bottom, 4)
     }
-
-    // MARK: - Footer
-
-    private var footer: some View {
-        HStack(spacing: 8) {
-            Button {
-                controller.regenerate()
-            } label: {
-                Label("Regenerate", systemImage: "arrow.clockwise")
-                    .labelStyle(.iconOnly)
-            }
-            .help("Regenerate")
-            .keyboardShortcut("r", modifiers: .command)
-            .disabled(controller.original.isEmpty || controller.isStreaming)
-
-            Spacer(minLength: 0)
-
-            Button {
-                controller.copyOutput()
-            } label: {
-                Text(controller.didCopy ? "Copied" : "Copy")
-                    .frame(minWidth: 44)
-            }
-            .keyboardShortcut("c", modifiers: .command)
-            .disabled(!controller.canAct)
-
-            Button {
-                controller.pasteOutput()
-            } label: {
-                Text(controller.pasteLabel)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(minWidth: 40)
-            }
-            .help("Paste into \(controller.targetAppName ?? "the previous app") (↩)")
-            .buttonStyle(.borderedProminent)
-            .disabled(!controller.canAct)
-        }
-        .controlSize(.small)
-        .font(.system(size: 11.5))
-        .padding(.horizontal, 10)
-        .frame(height: 40)
-    }
-
-    private static let bottomAnchor = "boop.bottom"
 }

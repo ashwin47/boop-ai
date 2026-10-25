@@ -14,14 +14,10 @@ final class PopupController {
     static let shared = PopupController()
 
     private(set) var original = ""
-    private(set) var output = ""
-    private(set) var isStreaming = false
-    private(set) var isReasoning = false
+    /// The action being run, while the model is working on it.
+    private(set) var runningAction: RewriteAction?
     private(set) var errorMessage: String?
-    private(set) var modelName = ""
-    private(set) var didCopy = false
-    /// Name of the app the text came from, e.g. "Google Chrome".
-    private(set) var targetAppName: String?
+    private(set) var highlightedIndex = 0
 
     @ObservationIgnored private var popover: NSPopover?
     @ObservationIgnored private var anchorWindow: AnchorWindow?
@@ -37,7 +33,9 @@ final class PopupController {
 
     private init() {}
 
-    var canAct: Bool { !output.isEmpty && !isStreaming }
+    var isRunning: Bool { runningAction != nil }
+
+    var menuItems: [RewriteAction] { BoopSettings.shared.actions }
 
     // MARK: - Entry point
 
@@ -58,7 +56,6 @@ final class PopupController {
         guard frontmost?.processIdentifier != ProcessInfo.processInfo.processIdentifier
         else { return }
         sourceApp = frontmost
-        targetAppName = frontmost?.localizedName
 
         captureTask?.cancel()
         captureTask = Task {
@@ -68,112 +65,94 @@ final class PopupController {
                 guard !Task.isCancelled,
                       NSWorkspace.shared.frontmostApplication?.processIdentifier == frontmost?.processIdentifier
                 else { return }
+                resetMenu()
+                original = ""
+                errorMessage = "Select some text first, then press the Boop hot key."
                 present(anchoredTo: nil, kind: .unknown)
-                fail("Select some text first, then press the Boop hot key.")
                 return
             }
             guard !Task.isCancelled else { return }
+            resetMenu()
             original = selection.text
             present(anchoredTo: selection.anchor, kind: selection.anchorKind)
-            start()
         }
     }
 
-    // MARK: - Streaming
-
-    func regenerate() {
-        guard !original.isEmpty else { return }
-        start()
+    private func resetMenu() {
+        streamTask?.cancel()
+        runningAction = nil
+        errorMessage = nil
+        highlightedIndex = 0
     }
 
-    private func start() {
+    // MARK: - Menu
+
+    func highlight(_ index: Int) {
+        highlightedIndex = index
+    }
+
+    func moveHighlight(by offset: Int) {
+        let count = menuItems.count
+        guard count > 0 else { return }
+        highlightedIndex = (highlightedIndex + offset + count) % count
+    }
+
+    func run(at index: Int) {
+        let items = menuItems
+        guard items.indices.contains(index) else { return }
+        highlightedIndex = index
+        run(items[index])
+    }
+
+    /// Sends the selection through `action` and pastes the reply over it.
+    func run(_ action: RewriteAction) {
+        guard !original.isEmpty, !isRunning else { return }
         streamTask?.cancel()
-        output = ""
         errorMessage = nil
-        didCopy = false
-        isStreaming = true
-        HotKeyManager.shared.disableConfirmKey()
+        runningAction = action
 
         let settings = BoopSettings.shared
-        modelName = settings.model.name
         let client = GatewayClient(settings: settings)
-        let prompt = settings.prompt
         let model = settings.modelID
         let effort = settings.reasoningEffort
         let text = original
-        isReasoning = effort != .default
 
         streamTask = Task {
             do {
-                let deltas = client.stream(
-                    model: model, system: prompt, user: text, effort: effort
-                )
-                // Tokens arrive far faster than the display refreshes. Appending
-                // each one straight to `output` makes SwiftUI update several times
-                // per frame, which trips a runtime issue — and a runtime issue
-                // pulls Xcode to the front, stealing focus mid-stream.
-                var pending = ""
-                var lastFlush = ContinuousClock.now
-                for try await delta in deltas {
+                var output = ""
+                for try await delta in client.stream(
+                    model: model, system: action.prompt, user: text, effort: effort
+                ) {
                     guard !Task.isCancelled else { return }
-                    pending += delta
-                    if ContinuousClock.now - lastFlush >= .milliseconds(50) {
-                        output += pending
-                        pending = ""
-                        lastFlush = ContinuousClock.now
-                    }
+                    output += delta
                 }
                 // Cancellation can end AsyncThrowingStream without throwing.
-                // A dismissed or superseded request must not announce completion.
+                // A dismissed or superseded request must not paste anything.
                 guard !Task.isCancelled else { return }
-                if !pending.isEmpty { output += pending }
-                isStreaming = false
-                if output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let result = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !result.isEmpty else {
+                    runningAction = nil
                     errorMessage = "The model returned an empty response."
-                } else {
-                    HotKeyManager.shared.enableConfirmKey()
-                    if settings.playSoundsOnComplete {
-                        CompletionSound.shared.play()
-                    }
+                    return
                 }
+                if settings.playSoundsOnComplete {
+                    CompletionSound.shared.play()
+                }
+                replaceSelection(with: result)
             } catch {
                 guard !Task.isCancelled else { return }
-                isStreaming = false
+                runningAction = nil
                 errorMessage = (error as? LocalizedError)?.errorDescription
                     ?? error.localizedDescription
             }
         }
     }
 
-    private func fail(_ message: String) {
-        streamTask?.cancel()
-        HotKeyManager.shared.disableConfirmKey()
-        isStreaming = false
-        original = ""
-        output = ""
-        didCopy = false
-        errorMessage = message
-    }
-
-    // MARK: - Actions
-
-    func copyOutput() {
-        guard canAct else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(trimmedOutput, forType: .string)
-        didCopy = true
-        Task {
-            try? await Task.sleep(for: .seconds(1.5))
-            didCopy = false
-        }
-    }
-
     /// Puts the text on the pasteboard, gives focus back to the original app and
-    /// sends it a ⌘V so the improved text replaces the selection.
-    func pasteOutput() {
-        guard canAct else { return }
+    /// sends it a ⌘V so the rewritten text replaces the selection.
+    private func replaceSelection(with text: String) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(trimmedOutput, forType: .string)
+        NSPasteboard.general.setString(text, forType: .string)
 
         let app = sourceApp
         dismiss()
@@ -186,16 +165,6 @@ final class PopupController {
             try? await Task.sleep(for: .milliseconds(120))
             Synthetic.paste()
         }
-    }
-
-    /// "Paste into Google Chrome" when we know where the text came from.
-    var pasteLabel: String {
-        guard let name = targetAppName, !name.isEmpty else { return "Paste" }
-        return "Paste into \(name)"
-    }
-
-    private var trimmedOutput: String {
-        output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Presentation
@@ -226,6 +195,9 @@ final class PopupController {
         if let popoverWindow = popover.contentViewController?.view.window as? NSPanel {
             popoverWindow.styleMask.insert(.nonactivatingPanel)
             popoverWindow.becomesKeyOnlyIfNeeded = true
+            // Key (but still non-activating) so arrow keys, Return and digits
+            // reach the menu without bringing Boop forward.
+            popoverWindow.makeKey()
         }
         popover.contentViewController?.view.window?.orderFrontRegardless()
         installDismissMonitors()
@@ -259,16 +231,14 @@ final class PopupController {
         captureTask = nil
         streamTask?.cancel()
         streamTask = nil
-        isStreaming = false
-        // Release Return the moment the popup goes away — nothing else on the
-        // system can use that key while it's claimed.
-        HotKeyManager.shared.disableConfirmKey()
+        runningAction = nil
         removeDismissMonitors()
         anchorWindow?.orderOut(nil)
     }
 
-    /// Boop isn't the active app while the popup is up, so Escape has to be caught
-    /// globally; the local monitor covers the case where a click did focus us.
+    /// Boop isn't the active app while the popup is up, so Escape is also caught
+    /// globally in case the popover failed to become key. The local monitor
+    /// drives the menu from the keyboard.
     private func installDismissMonitors() {
         removeDismissMonitors()
 
@@ -277,8 +247,24 @@ final class PopupController {
             self?.dismiss()
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard Int(event.keyCode) == kVK_Escape else { return event }
-            self?.dismiss()
+            guard let self else { return event }
+            switch Int(event.keyCode) {
+            case kVK_Escape:
+                dismiss()
+            case kVK_UpArrow:
+                if !isRunning { moveHighlight(by: -1) }
+            case kVK_DownArrow:
+                if !isRunning { moveHighlight(by: 1) }
+            case kVK_Return, kVK_ANSI_KeypadEnter:
+                if !isRunning { run(at: highlightedIndex) }
+            default:
+                // 1–9 run the matching row directly.
+                guard let digit = event.charactersIgnoringModifiers.flatMap(Int.init),
+                      (1...9).contains(digit),
+                      event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty
+                else { return event }
+                if !isRunning { run(at: digit - 1) }
+            }
             return nil
         }
         // Global mouse monitors only see clicks in *other* apps, so this dismisses

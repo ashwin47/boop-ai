@@ -16,7 +16,7 @@ struct BoopApp: App {
 
     var body: some Scene {
         MenuBarExtra("Boop", image: "BoopMark") {
-            Button("Improve Selection") { PopupController.shared.trigger() }
+            Button("Rewrite Selection…") { PopupController.shared.trigger() }
             Text(KeyCodes.description(code: settings.hotKeyCode, modifiers: settings.hotKeyModifiers))
             Divider()
             Button("Check for Updates…") { UpdaterManager.shared.checkForUpdates() }
@@ -35,7 +35,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UpdaterManager.shared.start()
 
         HotKeyManager.shared.onTrigger = { PopupController.shared.trigger() }
-        HotKeyManager.shared.onConfirm = { PopupController.shared.pasteOutput() }
         HotKeyManager.shared.reload()
 
         if !AccessibilityPermission.isGranted {

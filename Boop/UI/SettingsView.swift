@@ -14,8 +14,8 @@ struct SettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
             GatewaySettings()
                 .tabItem { Label("Gateway", systemImage: "key") }
-            PromptSettings()
-                .tabItem { Label("Prompt", systemImage: "text.quote") }
+            ActionSettings()
+                .tabItem { Label("Actions", systemImage: "list.bullet") }
         }
         .frame(width: 480, height: 460)
     }
@@ -191,29 +191,92 @@ private struct GatewaySettings: View {
     }
 }
 
-// MARK: - Prompt
+// MARK: - Actions
 
-private struct PromptSettings: View {
+private struct ActionSettings: View {
     @Bindable private var settings = BoopSettings.shared
+    @State private var selection: RewriteAction.ID?
+
+    private var selectedIndex: Int? {
+        settings.actions.firstIndex { $0.id == selection }
+    }
 
     var body: some View {
-        Form {
-            Section {
-                TextEditor(text: $settings.prompt)
-                    .font(.system(size: 12, design: .monospaced))
-                    .frame(minHeight: 260)
-                Button("Reset to default") {
-                    settings.prompt = BoopSettings.defaultPrompt
+        VStack(alignment: .leading, spacing: 0) {
+            List(selection: $selection) {
+                ForEach(settings.actions) { action in
+                    Label(action.name.isEmpty ? "Untitled" : action.name, systemImage: action.icon)
+                        .tag(action.id)
                 }
-            } header: {
-                Text("System Prompt")
-            } footer: {
-                Text("The selected text is sent as the user message.")
+                .onMove { settings.actions.move(fromOffsets: $0, toOffset: $1) }
+            }
+            .frame(height: 150)
+
+            HStack(spacing: 4) {
+                Button {
+                    let action = RewriteAction(
+                        name: "New action", icon: "sparkles",
+                        prompt: RewriteAction.template("Rewrite the user's text to ")
+                    )
+                    settings.actions.append(action)
+                    selection = action.id
+                } label: {
+                    Image(systemName: "plus").frame(width: 16)
+                }
+                Button {
+                    guard let index = selectedIndex else { return }
+                    settings.actions.remove(at: index)
+                    selection = nil
+                } label: {
+                    Image(systemName: "minus").frame(width: 16)
+                }
+                .disabled(selectedIndex == nil)
+                Spacer()
+                Text("Drag to reorder. 1–9 run an action from the menu.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .padding(.top, 4)
+                Button("Restore Defaults") {
+                    settings.actions = RewriteAction.defaults
+                    selection = nil
+                }
+            }
+            .controlSize(.small)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+
+            if let index = selectedIndex {
+                Form {
+                    TextField("Name", text: $settings.actions[index].name)
+                    Picker("Icon", selection: $settings.actions[index].icon) {
+                        ForEach(iconChoices(including: settings.actions[index].icon), id: \.self) { icon in
+                            Image(systemName: icon).tag(icon)
+                        }
+                    }
+                    Section {
+                        TextEditor(text: $settings.actions[index].prompt)
+                            .font(.system(size: 12, design: .monospaced))
+                            .frame(minHeight: 120)
+                    } header: {
+                        Text("System Prompt")
+                    } footer: {
+                        Text("The selected text is sent as the user message, and the reply replaces it.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .formStyle(.grouped)
+            } else {
+                Text("Select an action to edit its name, icon and prompt.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .formStyle(.grouped)
+    }
+
+    /// Keeps an icon chosen before the list changed selectable.
+    private func iconChoices(including current: String) -> [String] {
+        RewriteAction.iconChoices.contains(current)
+            ? RewriteAction.iconChoices : [current] + RewriteAction.iconChoices
     }
 }

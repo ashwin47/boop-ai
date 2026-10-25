@@ -6,7 +6,7 @@
 import AppKit
 
 enum PopupPlacement {
-    static let size = NSSize(width: 400, height: 300)
+    static let size = NSSize(width: 300, height: 160)
     private static let selectionGap: CGFloat = 6
 
     static func anchorRect(for bounds: NSRect?, kind: AnchorKind) -> NSRect {

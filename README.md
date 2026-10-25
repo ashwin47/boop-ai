@@ -9,9 +9,9 @@
 </div>
 
 Boop is a tiny menu-bar app that improves your writing in place. Select text in
-any app, press **Hyper + A**, and a popover appears next to the selection with a
-cleaned-up version streaming in. Copy it, or paste it straight back over the
-original.
+any app, press **Hyper + A**, pick an edit — Improve writing, Fix spelling and
+grammar, and so on — from the menu that appears next to the selection, and the
+rewritten text replaces the original.
 
 It was built to replace a feature that used to be free with your own API key.
 Boop is free, open source, and **bring your own key** — the only thing between
@@ -37,20 +37,20 @@ is a dropdown rather than a re-auth.
   on-device screen recognition fallback locates the text in the source window.
   Otherwise, Boop uses the focused control or a stable position in the source
   window. The pointer is used only when no usable window bounds are available.
-- **Streaming.** Responses stream in token by token.
+- **Action menu.** Choose an edit with the mouse, <kbd>↑</kbd>/<kbd>↓</kbd> and
+  <kbd>↩</kbd>, or <kbd>1</kbd>–<kbd>9</kbd>. The result is pasted straight over
+  the selection; <kbd>esc</kbd> cancels.
 - **Quiet completion sound.** Cuelume's Success chime plays when a rewrite
   finishes successfully. Enabled by default; turn it off with **Settings →
   General → Play sounds on complete**. Cancelled, failed, and empty responses
   stay silent.
-- **Copy / Paste / Regenerate.** Paste names its target — "Paste into Google
-  Chrome" — and replaces the original selection. Press <kbd>↩</kbd> to paste,
-  <kbd>esc</kbd> to dismiss.
 - **Eight models** across three providers, switchable in Settings.
 - **Reasoning effort** control for models that support it.
-- **Editable system prompt** — make it match your voice.
+- **Custom actions** — four built in; add, reorder and edit your own name, icon
+  and system prompt under **Settings → Actions**.
 - **Rebindable hot key**, defaulting to Hyper + A (⌃ ⌥ ⇧ ⌘ A).
-- **Stays out of the way.** No Dock icon, and Boop never steals focus — your
-  selection stays selected while the popover is open.
+- **Stays out of the way.** No Dock icon, and Boop never activates — focus
+  goes straight back to your app for the paste.
 
 ## Install
 
@@ -140,7 +140,7 @@ keyboard selections, multiline text, and windows on different displays.
 | `Capture/ScreenSelectionLocator.swift` | Optional window-only ScreenCaptureKit capture and on-device Vision text recognition. |
 | `Capture/ScreenTextMatcher.swift` | Finds a confident unique match, including wrapped text and small OCR errors. |
 | `Capture/Synthetic.swift` | Posts ⌘C / ⌘V, waiting for the Hyper chord to be released first — posted keystrokes otherwise inherit held modifiers. |
-| `Support/HotKeyManager.swift` | Carbon `RegisterEventHotKey` for the trigger chord and for Return, because Carbon *consumes* the keystroke where an event monitor only observes it. |
+| `Support/HotKeyManager.swift` | Carbon `RegisterEventHotKey` for the trigger chord, because Carbon *consumes* the keystroke where an event monitor only observes it. |
 | `AI/GatewayClient.swift` | Streaming SSE client for the AI Gateway. |
 | `UI/PopupPlacement.swift` | Turns an accessibility rectangle into somewhere sensible to anchor the popover. |
 
